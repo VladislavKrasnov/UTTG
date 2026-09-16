@@ -1,0 +1,16 @@
+.env
+.env.production
+deploy/.env
+deploy/stack.rendered.yml
+.venv/
+dist/
+build/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store
