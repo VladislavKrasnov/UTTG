@@ -1,0 +1,9 @@
+[Unit]
+Description=UTTG rolling deployment from GitHub
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/uttg
+ExecStart=/opt/uttg/deploy/update.sh

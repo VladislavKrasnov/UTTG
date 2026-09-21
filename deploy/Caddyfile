@@ -1,0 +1,12 @@
+{
+    email {$UTTG_ACME_EMAIL}
+}
+
+uttg.oxis.cc {
+    encode zstd gzip
+    reverse_proxy api:8000 {
+        health_uri /v1/ready
+        health_interval 5s
+        health_timeout 2s
+    }
+}
