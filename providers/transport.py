@@ -48,6 +48,14 @@ class ProviderTransport:
             follow_redirects=False,
             trust_env=False,
         )
+        self._direct_client = httpx.AsyncClient(
+            base_url=base_url,
+            timeout=httpx.Timeout(30.0, connect=10.0, pool=5.0),
+            limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
+            headers={"User-Agent": "UTTG/0.1 (+https://github.com/VladislavKrasnov/UTTG)"},
+            follow_redirects=False,
+            trust_env=False,
+        ) if settings.http_proxy else self._client
 
     async def get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         circuit_key = f"provider:{self.provider_id}:circuit-open"
@@ -73,7 +81,15 @@ class ProviderTransport:
         raise ProviderUnavailableError(f"Provider request failed: {self.provider_id}")
 
     async def _read_json(self, path: str, params: dict[str, Any] | None) -> Any:
-        async with self._client.stream("GET", path, params=params) as response:
+        try:
+            return await self._read_json_with_client(self._client, path, params)
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            if self._client is not self._direct_client:
+                return await self._read_json_with_client(self._direct_client, path, params)
+            raise
+
+    async def _read_json_with_client(self, client: httpx.AsyncClient, path: str, params: dict[str, Any] | None) -> Any:
+        async with client.stream("GET", path, params=params) as response:
             if response.status_code == 429:
                 await self._record_failure()
                 raise ProviderQuotaError(f"Provider quota exceeded: {self.provider_id}")
@@ -124,4 +140,6 @@ class ProviderTransport:
 
     async def close(self) -> None:
         await self._client.aclose()
+        if self._direct_client is not self._client:
+            await self._direct_client.aclose()
         await self._valkey.aclose()
