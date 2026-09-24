@@ -42,7 +42,7 @@ class ProviderTransport:
         self._client = httpx.AsyncClient(
             base_url=base_url,
             proxy=settings.http_proxy,
-            timeout=httpx.Timeout(15.0, connect=3.0, pool=2.0),
+            timeout=httpx.Timeout(30.0, connect=10.0, pool=5.0),
             limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=concurrency),
             headers={"User-Agent": "UTTG/0.1 (+https://github.com/VladislavKrasnov/UTTG)"},
             follow_redirects=False,

@@ -96,6 +96,8 @@ async def _run_guarded(
             try:
                 await job()
                 await _provider_health(provider_id, "active")
+                await asyncio.sleep(interval_seconds)
+                continue
             except Exception as exc:
                 safe_error = type(exc).__name__
                 await _provider_health(provider_id, "error", safe_error)
@@ -104,7 +106,9 @@ async def _run_guarded(
                     {"provider": provider_id, "job": job_name, "error": safe_error},
                 )
                 logger.exception("Provider ingestion failed", extra={"provider_id": provider_id})
-        await asyncio.sleep(interval_seconds)
+                await valkey.delete(lock_key)
+
+        await asyncio.sleep(60)
 
 
 async def _ingest_satcat() -> None:
