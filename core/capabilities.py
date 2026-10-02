@@ -9,9 +9,9 @@ from core.settings import settings
 _TAG_PROVIDERS: dict[str, tuple[str, ...]] = {
     "Satellite": ("space-track", "celestrak"),
     "Orbital": ("space-track", "celestrak"),
-    "Neo": ("nasa-neows",),
+    "Neo": ("jpl-ssd", "nasa-neows"),
     "Space Weather": ("noaa-swpc",),
-    "Launch": ("the-space-devs",),
+    "Launch": ("the-space-devs", "rocketlaunch-live"),
     "Events": ("space-track",),
     "Earth Observation": ("esa",),
 }
@@ -54,11 +54,13 @@ def configured_providers() -> frozenset[str]:
     if settings.nasa_api_key:
         providers.add("nasa-neows")
     if settings.enable_jpl:
-        providers.add("jpl-horizons")
+        providers.add("jpl-ssd")
     if settings.enable_noaa_swpc:
         providers.add("noaa-swpc")
     if settings.enable_space_devs_public_api or settings.the_space_devs_api_key:
         providers.add("the-space-devs")
+    if settings.enable_rocketlaunch_live:
+        providers.add("rocketlaunch-live")
     if settings.enable_esa:
         providers.add("esa")
     return frozenset(providers)
@@ -67,6 +69,10 @@ def configured_providers() -> frozenset[str]:
 def providers_for_tag(tag: str) -> tuple[str, ...]:
     configured = configured_providers()
     return tuple(provider for provider in _TAG_PROVIDERS.get(tag, ()) if provider in configured)
+
+
+def tag_sources(tag: str) -> list[str]:
+    return list(_TAG_PROVIDERS.get(tag, ()))
 
 
 def tag_enabled(tag: str) -> bool:

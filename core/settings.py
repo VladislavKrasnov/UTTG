@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     enable_jpl: bool = True
     enable_esa: bool = False
     enable_space_devs_public_api: bool = True
+    enable_rocketlaunch_live: bool = True
     http_proxy: str | None = None
 
     model_config = SettingsConfigDict(
