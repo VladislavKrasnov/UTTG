@@ -3,23 +3,34 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Iterator
+import random
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
+from dataclasses import asdict
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
 import valkey.asyncio as valkey_async
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 
 from core.capabilities import configured_providers
 from core.queue import close_nats, connect_nats, ensure_event_stream, nc
 from core.settings import settings
-from providers.celestrak import CelestrakClient
+from providers.celestrak import CelestrakClient, CelestrakNotModifiedError
+from providers.jpl import JplClient
+from providers.launch_records import UpcomingLaunch
 from providers.nasa import NasaClient
 from providers.noaa import NoaaClient
+from providers.rocketlaunch import RocketLaunchLiveClient
 from providers.spacedevs import SpaceDevsClient
 from providers.spacetrack import SpaceTrackClient
+from providers.transport import (
+    ProviderQuotaError,
+    ProviderRequestError,
+    ProviderResponseTooLargeError,
+    ProviderUnavailableError,
+)
 from storage.database import AsyncSessionLocal
 from storage.models import (
     CloseApproach,
@@ -34,6 +45,18 @@ from storage.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+_FIRST_RETRY_SECONDS = 60
+_RUNNING_LEASE_SECONDS = 900
+_GEOMAGNETIC_STORM_KP = 5.0
+_SELF_DESCRIBING_ERRORS = (
+    ProviderQuotaError,
+    ProviderRequestError,
+    ProviderResponseTooLargeError,
+    ProviderUnavailableError,
+)
+
+Job = Callable[[], Awaitable[None]]
 
 
 async def _publish_event(event_name: str, data: dict[str, Any]) -> None:
@@ -58,7 +81,20 @@ async def _publish_event(event_name: str, data: dict[str, Any]) -> None:
         logger.exception("Failed to publish webhook event", extra={"event": event_name})
 
 
+def _safe_error(exc: BaseException) -> str:
+    if isinstance(exc, _SELF_DESCRIBING_ERRORS):
+        return f"{type(exc).__name__}: {exc}"[:300]
+    return type(exc).__name__
+
+
 async def _provider_health(provider_id: str, status: str, error: str | None = None) -> None:
+    try:
+        await _write_provider_health(provider_id, status, error)
+    except Exception:
+        logger.exception("Failed to record provider health", extra={"provider": provider_id})
+
+
+async def _write_provider_health(provider_id: str, status: str, error: str | None) -> None:
     async with AsyncSessionLocal() as session:
         row = (
             await session.execute(select(ProviderHealth).where(ProviderHealth.id == provider_id))
@@ -77,38 +113,70 @@ async def _provider_health(provider_id: str, status: str, error: str | None = No
         await session.commit()
 
 
+def _retry_delay(consecutive_failures: int, interval_seconds: int) -> float:
+    exponential = float(_FIRST_RETRY_SECONDS * 2 ** min(consecutive_failures - 1, 10))
+    return min(exponential, interval_seconds) * random.uniform(0.8, 1.2)
+
+
+async def _acquire_slot(valkey: valkey_async.Valkey, lock_key: str, lease_seconds: int) -> float:
+    try:
+        if await valkey.set(lock_key, "1", ex=lease_seconds, nx=True):
+            return 0.0
+        return float(max(await valkey.ttl(lock_key), 5))
+    except Exception:
+        logger.exception("Scheduler lock store unavailable", extra={"lock": lock_key})
+        return float(_FIRST_RETRY_SECONDS)
+
+
+async def _hold_slot(valkey: valkey_async.Valkey, lock_key: str, seconds: float) -> None:
+    try:
+        await valkey.set(lock_key, "1", ex=max(int(seconds), 1))
+    except Exception:
+        logger.exception("Scheduler lock store unavailable", extra={"lock": lock_key})
+
+
 async def _run_guarded(
     valkey: valkey_async.Valkey,
-    provider_id: str,
+    provider_id: str | None,
     job_name: str,
     interval_seconds: int,
-    job: Callable[[], Awaitable[None]],
+    job: Job,
 ) -> None:
+    lock_key = f"scheduler:lock:{job_name}"
+    consecutive_failures = 0
     while True:
-        lock_key = f"scheduler:lock:{job_name}"
-        acquired = await valkey.set(
-            lock_key,
-            "1",
-            ex=max(interval_seconds - 30, 30),
-            nx=True,
-        )
-        if acquired:
-            try:
-                await job()
-                await _provider_health(provider_id, "active")
-                await asyncio.sleep(interval_seconds)
-                continue
-            except Exception as exc:
-                safe_error = type(exc).__name__
-                await _provider_health(provider_id, "error", safe_error)
-                await _publish_event(
-                    "provider.degraded",
-                    {"provider": provider_id, "job": job_name, "error": safe_error},
-                )
-                logger.exception("Provider ingestion failed", extra={"provider_id": provider_id})
-                await valkey.delete(lock_key)
-
-        await asyncio.sleep(60)
+        wait_seconds = await _acquire_slot(valkey, lock_key, _RUNNING_LEASE_SECONDS)
+        if wait_seconds:
+            await asyncio.sleep(wait_seconds)
+            continue
+        try:
+            await job()
+        except Exception as exc:
+            consecutive_failures += 1
+            error = _safe_error(exc)
+            delay = _retry_delay(consecutive_failures, interval_seconds)
+            logger.warning(
+                "Ingestion job %s failed (%s), attempt %d, retry in %.0f s",
+                job_name,
+                error,
+                consecutive_failures,
+                delay,
+            )
+            if provider_id:
+                await _provider_health(provider_id, "error", error)
+            await _publish_event(
+                "provider.degraded",
+                {"provider": provider_id or job_name, "job": job_name, "error": error},
+            )
+            await _hold_slot(valkey, lock_key, delay)
+            await asyncio.sleep(delay)
+            continue
+        consecutive_failures = 0
+        await _hold_slot(valkey, lock_key, interval_seconds)
+        logger.info("Ingestion job %s succeeded, next run in %d s", job_name, interval_seconds)
+        if provider_id:
+            await _provider_health(provider_id, "active")
+        await asyncio.sleep(interval_seconds)
 
 
 async def _ingest_satcat() -> None:
@@ -153,71 +221,58 @@ async def _ingest_orbital_elements() -> None:
     client = CelestrakClient()
     try:
         records = await client.get_group("active")
+    except CelestrakNotModifiedError:
+        logger.info("CelesTrak data unchanged since the previous download")
+        return
     finally:
         await client.close()
+    if not records:
+        raise ProviderUnavailableError("CelesTrak returned no parsable element sets")
 
-    satellites: list[dict[str, Any]] = []
-    elements: list[dict[str, Any]] = []
-    for record in records:
-        catalog_id = record.get("NORAD_CAT_ID")
-        epoch_value = record.get("EPOCH")
-        if not str(catalog_id).isdigit() or not epoch_value:
-            continue
-        epoch = _parse_datetime(str(epoch_value))
-        norad_id = int(str(catalog_id))
-        satellites.append(
-            {
-                "norad_id": norad_id,
-                "cospar_id": record.get("OBJECT_ID"),
-                "name": record.get("OBJECT_NAME") or str(norad_id),
-                "object_type": record.get("OBJECT_TYPE"),
+    satellites = list(
+        {
+            record.norad_id: {
+                "norad_id": record.norad_id,
+                "cospar_id": record.cospar_id,
+                "name": record.name,
             }
-        )
-        elements.append(
-            {
-                "id": uuid4(),
-                "norad_id": norad_id,
-                "epoch": epoch,
-                "inclination": _float(record.get("INCLINATION")),
-                "right_ascension": _float(record.get("RA_OF_ASC_NODE")),
-                "eccentricity": _float(record.get("ECCENTRICITY")),
-                "argument_of_perigee": _float(record.get("ARG_OF_PERICENTER")),
-                "mean_anomaly": _float(record.get("MEAN_ANOMALY")),
-                "mean_motion": _float(record.get("MEAN_MOTION")),
-                "tle_line1": record.get("TLE_LINE1"),
-                "tle_line2": record.get("TLE_LINE2"),
-                "provider": "celestrak",
-            }
-        )
-
+            for record in records
+        }.values()
+    )
+    elements = [
+        {
+            "id": uuid4(),
+            "norad_id": record.norad_id,
+            "epoch": record.epoch,
+            "inclination": record.inclination,
+            "right_ascension": record.right_ascension,
+            "eccentricity": record.eccentricity,
+            "argument_of_perigee": record.argument_of_perigee,
+            "mean_anomaly": record.mean_anomaly,
+            "mean_motion": record.mean_motion,
+            "tle_line1": record.tle_line1,
+            "tle_line2": record.tle_line2,
+            "provider": "celestrak",
+        }
+        for record in records
+    ]
     async with AsyncSessionLocal() as session:
-        for batch in _batches(satellites, 500):
+        for batch in _batches(satellites, 1000):
             statement = insert(Satellite).values(batch)
             statement = statement.on_conflict_do_update(
                 index_elements=["norad_id"],
                 set_={
                     "cospar_id": statement.excluded.cospar_id,
                     "name": statement.excluded.name,
-                    "object_type": statement.excluded.object_type,
                 },
             )
             await session.execute(statement)
-        for batch in _batches(elements, 300):
-            statement = insert(OrbitalElement).values(batch)
-            statement = statement.on_conflict_do_update(
-                index_elements=["norad_id", "provider", "epoch"],
-                set_={
-                    "inclination": statement.excluded.inclination,
-                    "right_ascension": statement.excluded.right_ascension,
-                    "eccentricity": statement.excluded.eccentricity,
-                    "argument_of_perigee": statement.excluded.argument_of_perigee,
-                    "mean_anomaly": statement.excluded.mean_anomaly,
-                    "mean_motion": statement.excluded.mean_motion,
-                    "tle_line1": statement.excluded.tle_line1,
-                    "tle_line2": statement.excluded.tle_line2,
-                },
+        for batch in _batches(elements, 1000):
+            await session.execute(
+                insert(OrbitalElement)
+                .values(batch)
+                .on_conflict_do_nothing(index_elements=["norad_id", "provider", "epoch"])
             )
-            await session.execute(statement)
         await session.commit()
     logger.info("CelesTrak orbital ingestion complete", extra={"records": len(elements)})
     await _publish_event("object.updated", {"provider": "celestrak", "count": len(elements)})
@@ -226,53 +281,29 @@ async def _ingest_orbital_elements() -> None:
 async def _ingest_space_weather() -> None:
     client = NoaaClient()
     try:
-        index_records, wind_records = await asyncio.gather(
-            client.get_planetary_k(),
-            client.get_solar_wind(),
-        )
+        indices, winds = await asyncio.gather(client.get_planetary_k(), client.get_solar_wind())
     finally:
         await client.close()
+    if not indices and not winds:
+        raise ProviderUnavailableError("NOAA SWPC returned no valid observations")
 
-    indices_dict: dict[Any, dict[str, Any]] = {}
-    for record in index_records:
-        if not record.get("time_tag"):
-            continue
-        ts = _parse_datetime(str(record["time_tag"]))
-        indices_dict[ts] = {
-            "id": uuid4(),
-            "timestamp": ts,
-            "kp_index": _float(record.get("kp", 0)) or 0.0,
-            "ap_index": _float(record.get("ap")),
-        }
-    indices = list(indices_dict.values())
-
-    winds_dict: dict[Any, dict[str, Any]] = {}
-    for record in wind_records:
-        if not record.get("time_tag"):
-            continue
-        ts = _parse_datetime(str(record["time_tag"]))
-        winds_dict[ts] = {
-            "id": uuid4(),
-            "timestamp": ts,
-            "speed_km_s": _float(record.get("proton_speed", record.get("speed", 0))) or 0.0,
-            "density_cm3": _float(record.get("proton_density", record.get("density", 0))) or 0.0,
-            "temperature_k": _float(record.get("proton_temperature", record.get("temperature", 0)))
-            or 0.0,
-        }
-    winds = list(winds_dict.values())
     async with AsyncSessionLocal() as session:
         if indices:
-            statement = insert(SpaceWeatherIndex).values(indices)
+            statement = insert(SpaceWeatherIndex).values(
+                [
+                    {"id": uuid4(), "timestamp": item.timestamp, "kp_index": item.kp_index}
+                    for item in indices
+                ]
+            )
             statement = statement.on_conflict_do_update(
                 index_elements=["timestamp"],
-                set_={
-                    "kp_index": statement.excluded.kp_index,
-                    "ap_index": statement.excluded.ap_index,
-                },
+                set_={"kp_index": statement.excluded.kp_index},
             )
             await session.execute(statement)
         if winds:
-            statement = insert(SolarWind).values(winds)
+            statement = insert(SolarWind).values(
+                [{"id": uuid4(), **asdict(item)} for item in winds]
+            )
             statement = statement.on_conflict_do_update(
                 index_elements=["timestamp"],
                 set_={
@@ -287,14 +318,85 @@ async def _ingest_space_weather() -> None:
         "NOAA SWPC ingestion complete",
         extra={"indices": len(indices), "solar_wind": len(winds)},
     )
-    if indices and indices[0]["kp_index"] >= 5:
+    if indices and indices[-1].kp_index >= _GEOMAGNETIC_STORM_KP:
         await _publish_event(
             "space_weather.alert",
-            {"provider": "noaa-swpc", "kp_index": indices[0]["kp_index"]},
+            {"provider": "noaa-swpc", "kp_index": indices[-1].kp_index},
         )
 
 
-async def _ingest_neos() -> None:
+async def _store_close_approaches(
+    provider_id: str, objects: Sequence[dict[str, Any]], approaches: Sequence[dict[str, Any]]
+) -> None:
+    async with AsyncSessionLocal() as session:
+        for batch in _batches(list(objects), 1000):
+            statement = insert(NearEarthObject).values(batch)
+            statement = statement.on_conflict_do_update(
+                index_elements=["id"],
+                set_={
+                    "name": statement.excluded.name,
+                    "absolute_magnitude_h": statement.excluded.absolute_magnitude_h,
+                    "estimated_diameter_min_km": statement.excluded.estimated_diameter_min_km,
+                    "estimated_diameter_max_km": statement.excluded.estimated_diameter_max_km,
+                    "is_potentially_hazardous": statement.excluded.is_potentially_hazardous,
+                    "is_sentry_object": statement.excluded.is_sentry_object,
+                },
+            )
+            await session.execute(statement)
+        for batch in _batches(list(approaches), 1000):
+            statement = insert(CloseApproach).values(batch)
+            statement = statement.on_conflict_do_update(
+                index_elements=["neo_id", "close_approach_date", "orbiting_body"],
+                set_={
+                    "relative_velocity_kms": statement.excluded.relative_velocity_kms,
+                    "miss_distance_au": statement.excluded.miss_distance_au,
+                },
+            )
+            await session.execute(statement)
+        await session.commit()
+    logger.info("Close-approach ingestion complete", extra={"objects": len(objects)})
+    await _publish_event("object.updated", {"provider": provider_id, "count": len(objects)})
+
+
+async def _ingest_jpl_close_approaches() -> None:
+    client = JplClient()
+    try:
+        records, hazardous, sentry = await asyncio.gather(
+            client.get_close_approaches(),
+            client.get_hazardous_designations(),
+            client.get_sentry_designations(),
+        )
+    finally:
+        await client.close()
+    objects = {
+        record.designation: {
+            "id": record.designation,
+            "name": record.name,
+            "absolute_magnitude_h": record.absolute_magnitude_h,
+            "estimated_diameter_min_km": record.diameter_min_km,
+            "estimated_diameter_max_km": record.diameter_max_km,
+            "is_potentially_hazardous": record.designation in hazardous,
+            "is_sentry_object": record.designation in sentry,
+        }
+        for record in records
+    }
+    approaches = list(
+        {
+            (record.designation, record.approach_at): {
+                "id": uuid4(),
+                "neo_id": record.designation,
+                "close_approach_date": record.approach_at,
+                "relative_velocity_kms": record.relative_velocity_kms,
+                "miss_distance_au": record.miss_distance_au,
+                "orbiting_body": "Earth",
+            }
+            for record in records
+        }.values()
+    )
+    await _store_close_approaches("jpl-ssd", list(objects.values()), approaches)
+
+
+async def _ingest_nasa_neos() -> None:
     client = NasaClient()
     today = date.today()
     try:
@@ -305,7 +407,7 @@ async def _ingest_neos() -> None:
         await client.close()
 
     objects: dict[str, dict[str, Any]] = {}
-    approaches: list[dict[str, Any]] = []
+    approaches: dict[tuple[str, datetime, str], dict[str, Any]] = {}
     for daily_objects in payload.get("near_earth_objects", {}).values():
         for item in daily_objects:
             neo_id = str(item["id"])
@@ -323,89 +425,92 @@ async def _ingest_neos() -> None:
                 timestamp = approach.get("close_approach_date_full") or approach.get(
                     "close_approach_date"
                 )
-                if not timestamp:
-                    continue
-                approaches.append(
-                    {
-                        "id": uuid4(),
-                        "neo_id": neo_id,
-                        "close_approach_date": _parse_nasa_datetime(str(timestamp)),
-                        "relative_velocity_kms": float(
-                            approach.get("relative_velocity", {}).get("kilometers_per_second", 0)
-                        ),
-                        "miss_distance_au": float(
-                            approach.get("miss_distance", {}).get("astronomical", 0)
-                        ),
-                        "orbiting_body": approach.get("orbiting_body") or "Earth",
-                    }
+                velocity = _float(
+                    approach.get("relative_velocity", {}).get("kilometers_per_second")
                 )
+                distance = _float(approach.get("miss_distance", {}).get("astronomical"))
+                if not timestamp or velocity is None or distance is None:
+                    continue
+                approach_at = _parse_nasa_datetime(str(timestamp))
+                body = approach.get("orbiting_body") or "Earth"
+                approaches[(neo_id, approach_at, body)] = {
+                    "id": uuid4(),
+                    "neo_id": neo_id,
+                    "close_approach_date": approach_at,
+                    "relative_velocity_kms": velocity,
+                    "miss_distance_au": distance,
+                    "orbiting_body": body,
+                }
+    await _store_close_approaches("nasa-neows", list(objects.values()), list(approaches.values()))
 
+
+async def _fetch_spacedevs_launches() -> list[UpcomingLaunch]:
+    client = SpaceDevsClient()
+    try:
+        return await client.get_upcoming_launches()
+    finally:
+        await client.close()
+
+
+async def _fetch_rocketlaunch_launches() -> list[UpcomingLaunch]:
+    client = RocketLaunchLiveClient()
+    try:
+        return await client.get_upcoming_launches()
+    finally:
+        await client.close()
+
+
+_LAUNCH_SOURCES: tuple[tuple[str, Callable[[], Awaitable[list[UpcomingLaunch]]]], ...] = (
+    ("the-space-devs", _fetch_spacedevs_launches),
+    ("rocketlaunch-live", _fetch_rocketlaunch_launches),
+)
+
+
+async def _replace_upcoming_launches(launches: list[UpcomingLaunch]) -> None:
+    values = [asdict(launch) for launch in launches]
     async with AsyncSessionLocal() as session:
-        if objects:
-            statement = insert(NearEarthObject).values(list(objects.values()))
-            statement = statement.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "name": statement.excluded.name,
-                    "absolute_magnitude_h": statement.excluded.absolute_magnitude_h,
-                    "estimated_diameter_min_km": statement.excluded.estimated_diameter_min_km,
-                    "estimated_diameter_max_km": statement.excluded.estimated_diameter_max_km,
-                    "is_potentially_hazardous": statement.excluded.is_potentially_hazardous,
-                    "is_sentry_object": statement.excluded.is_sentry_object,
-                },
+        statement = insert(Launch).values(values)
+        statement = statement.on_conflict_do_update(
+            index_elements=["id"],
+            set_={
+                column: statement.excluded[column]
+                for column in values[0]
+                if column not in {"id", "provider"}
+            },
+        )
+        await session.execute(statement)
+        await session.execute(
+            delete(Launch).where(
+                Launch.window_start >= datetime.now(UTC),
+                Launch.id.not_in([launch.id for launch in launches]),
             )
-            await session.execute(statement)
-        if approaches:
-            statement = insert(CloseApproach).values(approaches)
-            statement = statement.on_conflict_do_update(
-                index_elements=["neo_id", "close_approach_date", "orbiting_body"],
-                set_={
-                    "relative_velocity_kms": statement.excluded.relative_velocity_kms,
-                    "miss_distance_au": statement.excluded.miss_distance_au,
-                },
-            )
-            await session.execute(statement)
+        )
         await session.commit()
-    logger.info("NASA NEO ingestion complete", extra={"objects": len(objects)})
-    await _publish_event("object.updated", {"provider": "nasa-neows", "count": len(objects)})
 
 
 async def _ingest_launches() -> None:
-    client = SpaceDevsClient()
-    try:
-        payload = await client.get_upcoming_launches(100)
-    finally:
-        await client.close()
-    values = [
-        {
-            "id": str(item["id"]),
-            "name": item.get("name") or str(item["id"]),
-            "status": (item.get("status") or {}).get("name"),
-            "window_start": _parse_datetime(item["window_start"])
-            if item.get("window_start")
-            else None,
-            "window_end": _parse_datetime(item["window_end"]) if item.get("window_end") else None,
-            "provider": "the-space-devs",
-        }
-        for item in payload.get("results", [])
-        if item.get("id")
-    ]
-    async with AsyncSessionLocal() as session:
-        if values:
-            statement = insert(Launch).values(values)
-            statement = statement.on_conflict_do_update(
-                index_elements=["id"],
-                set_={
-                    "name": statement.excluded.name,
-                    "status": statement.excluded.status,
-                    "window_start": statement.excluded.window_start,
-                    "window_end": statement.excluded.window_end,
-                },
-            )
-            await session.execute(statement)
-        await session.commit()
-    logger.info("Launch ingestion complete", extra={"records": len(values)})
-    await _publish_event("launch.updated", {"provider": "the-space-devs", "count": len(values)})
+    configured = configured_providers()
+    failures: list[str] = []
+    for provider_id, fetch in _LAUNCH_SOURCES:
+        if provider_id not in configured:
+            continue
+        try:
+            launches = await fetch()
+            if not launches:
+                raise ProviderUnavailableError(f"{provider_id} returned no upcoming launches")
+            await _replace_upcoming_launches(launches)
+        except Exception as exc:
+            error = _safe_error(exc)
+            failures.append(f"{provider_id}: {error}")
+            await _provider_health(provider_id, "error", error)
+            continue
+        await _provider_health(provider_id, "active")
+        logger.info(
+            "Launch ingestion complete", extra={"provider": provider_id, "records": len(launches)}
+        )
+        await _publish_event("launch.updated", {"provider": provider_id, "count": len(launches)})
+        return
+    raise ProviderUnavailableError("; ".join(failures) or "No launch provider is configured")
 
 
 async def run_scheduler() -> None:
@@ -413,25 +518,28 @@ async def run_scheduler() -> None:
     await ensure_event_stream()
     valkey = valkey_async.from_url(settings.valkey_url)  # type: ignore[no-untyped-call]
     providers = configured_providers()
-    jobs: list[Awaitable[None]] = []
+    jobs: list[Coroutine[Any, Any, None]] = []
     if "space-track" in providers:
         jobs.append(_run_guarded(valkey, "space-track", "satcat", 86400, _ingest_satcat))
     if "celestrak" in providers:
-        jobs.append(_run_guarded(valkey, "celestrak", "orbital", 3600, _ingest_orbital_elements))
+        jobs.append(_run_guarded(valkey, "celestrak", "orbital", 7200, _ingest_orbital_elements))
     if "noaa-swpc" in providers:
         jobs.append(_run_guarded(valkey, "noaa-swpc", "space-weather", 300, _ingest_space_weather))
+    if "jpl-ssd" in providers:
+        jobs.append(
+            _run_guarded(valkey, "jpl-ssd", "close-approaches", 21600, _ingest_jpl_close_approaches)
+        )
     if "nasa-neows" in providers:
-        jobs.append(_run_guarded(valkey, "nasa-neows", "neos", 3600, _ingest_neos))
-    if "the-space-devs" in providers:
-        jobs.append(_run_guarded(valkey, "the-space-devs", "launches", 14400, _ingest_launches))
+        jobs.append(_run_guarded(valkey, "nasa-neows", "neos", 21600, _ingest_nasa_neos))
+    if providers & {provider_id for provider_id, _ in _LAUNCH_SOURCES}:
+        jobs.append(_run_guarded(valkey, None, "launches", 1800, _ingest_launches))
 
     try:
-        if jobs:
-            await asyncio.gather(*jobs)
-        else:
+        if not jobs:
             await asyncio.Event().wait()
-    except asyncio.CancelledError:
-        pass
+        async with asyncio.TaskGroup() as group:
+            for job in jobs:
+                group.create_task(job)
     finally:
         await valkey.aclose()
         await close_nats()
@@ -460,8 +568,6 @@ def _float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     try:
-        if isinstance(value, str):
-            value = value.rstrip("Zz")
         return float(value)
     except (ValueError, TypeError):
         return None
