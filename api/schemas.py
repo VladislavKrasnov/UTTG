@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 # Orbital Element Schema
@@ -74,12 +74,31 @@ class SolarWindResponse(BaseModel):
 
 
 class LaunchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     name: str
     status: str | None
     window_start: datetime | None
     window_end: datetime | None
     provider: str | None
+    operator: str | None
+    vehicle: str | None
+    pad: str | None
+    location: str | None
+    latitude: float | None
+    longitude: float | None
+    mission_description: str | None
+    weather_summary: str | None
+    info_url: str | None
+
+
+class TwoLineElementResponse(BaseModel):
+    norad_id: int
+    name: str
+    epoch: datetime
+    tle_line1: str
+    tle_line2: str
 
 
 class ReentryEventResponse(BaseModel):

@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import desc, func, select
 
 from api.models import APIResponse
+from api.schemas import LaunchResponse
 from api.utils import build_meta
 from core.cache_layer import cached
-from core.capabilities import require_capability
+from core.capabilities import require_capability, tag_sources
 from core.rate_limit import RateLimiter
 from storage.database import AsyncSessionLocal, get_db
 from storage.models import (
@@ -23,7 +24,13 @@ from storage.models import (
     SpaceWeatherIndex,
 )
 
+_LUNAR_DISTANCES_PER_AU = 149_597_870.7 / 384_400.0
+
 router = APIRouter()
+_LAUNCH_SOURCES = tag_sources("Launch")
+_NEO_SOURCES = tag_sources("Neo")
+_WEATHER_SOURCES = tag_sources("Space Weather")
+_ORBITAL_SOURCES = tag_sources("Orbital")
 
 
 async def _cached_data(
@@ -77,7 +84,7 @@ async def catalog_summary(request: Request, db: Any = Depends(get_db)) -> Any:
     data = await _cached_data(request, "catalog:summary", load, 300, 3600)
     return APIResponse(
         data=data,
-        meta=await build_meta("/catalog/summary", db, ["space-track", "celestrak"]),
+        meta=await build_meta("/catalog/summary", db, _ORBITAL_SOURCES),
     )
 
 
@@ -93,7 +100,7 @@ def _dimension_route(path: str, column: Any, cache_name: str) -> None:
         data = await _cached_data(request, f"catalog:{cache_name}:{limit}", load, 600, 3600)
         return APIResponse(
             data=data,
-            meta=await build_meta(path, db, ["space-track", "celestrak"]),
+            meta=await build_meta(path, db, _ORBITAL_SOURCES),
         )
 
     router.add_api_route(
@@ -192,7 +199,7 @@ async def latest_orbit_epochs(
     ).all()
     return APIResponse(
         data=[{"norad_id": row.norad_id, "epoch": row.epoch} for row in rows],
-        meta=await build_meta("/orbits/latest-epochs", db, ["space-track", "celestrak"]),
+        meta=await build_meta("/orbits/latest-epochs", db, _ORBITAL_SOURCES),
     )
 
 
@@ -213,13 +220,8 @@ async def next_launch(db: Any = Depends(get_db)) -> Any:
     if row is None:
         raise HTTPException(status_code=404, detail="No upcoming launch is available")
     return APIResponse(
-        data={
-            "id": row.id,
-            "name": row.name,
-            "status": row.status,
-            "window_start": row.window_start,
-        },
-        meta=await build_meta("/launches/next", db, ["the-space-devs"]),
+        data=LaunchResponse.model_validate(row),
+        meta=await build_meta("/launches/next", db, _LAUNCH_SOURCES),
     )
 
 
@@ -251,7 +253,7 @@ async def launch_calendar(days: int = Query(30, ge=1, le=366), db: Any = Depends
             {"id": row.id, "name": row.name, "status": row.status, "window_start": row.window_start}
             for row in rows
         ],
-        meta=await build_meta("/launches/calendar", db, ["the-space-devs"]),
+        meta=await build_meta("/launches/calendar", db, _LAUNCH_SOURCES),
     )
 
 
@@ -273,7 +275,7 @@ async def launch_statistics(db: Any = Depends(get_db)) -> Any:
     ).all()
     return APIResponse(
         data={"by_status": [{"status": row.status, "count": row.count} for row in rows]},
-        meta=await build_meta("/launches/statistics", db, ["the-space-devs"]),
+        meta=await build_meta("/launches/statistics", db, _LAUNCH_SOURCES),
     )
 
 
@@ -295,7 +297,7 @@ async def latest_kp(db: Any = Depends(get_db)) -> Any:
         raise HTTPException(status_code=404, detail="No geomagnetic observation is available")
     return APIResponse(
         data={"timestamp": row.timestamp, "kp_index": row.kp_index, "ap_index": row.ap_index},
-        meta=await build_meta("/space-weather/geomagnetic-indices/latest", db, ["noaa-swpc"]),
+        meta=await build_meta("/space-weather/geomagnetic-indices/latest", db, _WEATHER_SOURCES),
     )
 
 
@@ -320,7 +322,7 @@ async def latest_wind(db: Any = Depends(get_db)) -> Any:
             "density_cm3": row.density_cm3,
             "temperature_k": row.temperature_k,
         },
-        meta=await build_meta("/space-weather/solar-wind/latest", db, ["noaa-swpc"]),
+        meta=await build_meta("/space-weather/solar-wind/latest", db, _WEATHER_SOURCES),
     )
 
 
@@ -343,7 +345,7 @@ async def weather_freshness(db: Any = Depends(get_db)) -> Any:
             "solar_wind_observed_at": wind_time,
             "solar_wind_age_seconds": int((now - wind_time).total_seconds()) if wind_time else None,
         },
-        meta=await build_meta("/space-weather/freshness", db, ["noaa-swpc"]),
+        meta=await build_meta("/space-weather/freshness", db, _WEATHER_SOURCES),
     )
 
 
@@ -367,7 +369,7 @@ async def neo_statistics(db: Any = Depends(get_db)) -> Any:
     ).one()
     return APIResponse(
         data={"total": total, "potentially_hazardous": hazardous, "sentry": sentry},
-        meta=await build_meta("/neos/statistics", db, ["nasa-neows"]),
+        meta=await build_meta("/neos/statistics", db, _NEO_SOURCES),
     )
 
 
@@ -397,7 +399,7 @@ async def hazardous_neos(limit: int = Query(100, ge=1, le=500), db: Any = Depend
             {"id": row.id, "name": row.name, "absolute_magnitude_h": row.absolute_magnitude_h}
             for row in rows
         ],
-        meta=await build_meta("/neos/hazardous", db, ["nasa-neows"]),
+        meta=await build_meta("/neos/hazardous", db, _NEO_SOURCES),
     )
 
 
@@ -416,30 +418,34 @@ async def upcoming_approaches(
 ) -> Any:
     start = datetime.now(UTC)
     rows = (
-        (
-            await db.execute(
-                select(CloseApproach)
-                .where(
-                    CloseApproach.close_approach_date >= start,
-                    CloseApproach.close_approach_date < start + timedelta(days=days),
-                )
-                .order_by(CloseApproach.close_approach_date)
-                .limit(limit)
+        await db.execute(
+            select(CloseApproach, NearEarthObject)
+            .join(NearEarthObject, NearEarthObject.id == CloseApproach.neo_id)
+            .where(
+                CloseApproach.close_approach_date >= start,
+                CloseApproach.close_approach_date < start + timedelta(days=days),
             )
+            .order_by(CloseApproach.close_approach_date)
+            .limit(limit)
         )
-        .scalars()
-        .all()
-    )
+    ).all()
     return APIResponse(
         data=[
             {
-                "neo_id": row.neo_id,
-                "close_approach_date": row.close_approach_date,
-                "relative_velocity_kms": row.relative_velocity_kms,
-                "miss_distance_au": row.miss_distance_au,
-                "orbiting_body": row.orbiting_body,
+                "neo_id": approach.neo_id,
+                "name": neo.name,
+                "close_approach_date": approach.close_approach_date,
+                "relative_velocity_kms": approach.relative_velocity_kms,
+                "miss_distance_au": approach.miss_distance_au,
+                "miss_distance_lunar": round(
+                    approach.miss_distance_au * _LUNAR_DISTANCES_PER_AU, 2
+                ),
+                "orbiting_body": approach.orbiting_body,
+                "estimated_diameter_min_km": neo.estimated_diameter_min_km,
+                "estimated_diameter_max_km": neo.estimated_diameter_max_km,
+                "is_potentially_hazardous": neo.is_potentially_hazardous,
             }
-            for row in rows
+            for approach, neo in rows
         ],
-        meta=await build_meta("/neos/close-approaches/upcoming", db, ["nasa-neows"]),
+        meta=await build_meta("/neos/close-approaches/upcoming", db, _NEO_SOURCES),
     )

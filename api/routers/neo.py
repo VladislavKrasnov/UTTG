@@ -7,13 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.models import APIResponse
 from api.schemas import CloseApproachResponse, NearEarthObjectResponse
 from api.utils import build_meta
-from core.capabilities import unavailable_endpoint
+from core.capabilities import tag_sources, unavailable_endpoint
 from core.rate_limit import RateLimiter
 from storage.database import get_db
 from storage.models import CloseApproach, NearEarthObject
 
 router = APIRouter(tags=["Neo"])
-_SOURCES = ["nasa-neows"]
+_NEO_SOURCES = tag_sources("Neo")
 
 
 def _neo_response(neo: NearEarthObject) -> NearEarthObjectResponse:
@@ -40,7 +40,7 @@ async def get_neos(
     objects = (await db.execute(statement)).scalars().all()
     return APIResponse(
         data=[_neo_response(neo) for neo in objects],
-        meta=await build_meta("/neos", db, _SOURCES),
+        meta=await build_meta("/neos", db, _NEO_SOURCES),
     )
 
 
@@ -75,7 +75,7 @@ async def get_neo_approaches(
     ]
     return APIResponse(
         data=data,
-        meta=await build_meta("/neos/close-approaches", db, _SOURCES),
+        meta=await build_meta("/neos/close-approaches", db, _NEO_SOURCES),
     )
 
 
@@ -91,7 +91,7 @@ async def get_neo(
         raise HTTPException(status_code=404, detail="Near Earth Object not found")
     return APIResponse(
         data=_neo_response(neo),
-        meta=await build_meta(f"/neos/{neo_id}", db, _SOURCES),
+        meta=await build_meta(f"/neos/{neo_id}", db, _NEO_SOURCES),
     )
 
 
