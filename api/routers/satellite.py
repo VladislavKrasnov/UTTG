@@ -7,12 +7,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.models import APIResponse
 from api.utils import build_meta
 from core.cache_layer import cached
-from core.capabilities import unavailable_endpoint
+from core.capabilities import tag_sources, unavailable_endpoint
 from core.rate_limit import RateLimiter
 from storage.database import AsyncSessionLocal, get_db
 from storage.models import Satellite
 
 router = APIRouter(tags=["Satellite"])
+_ORBITAL_SOURCES = tag_sources("Orbital")
 
 
 @router.get("/satellites/{norad_id}", dependencies=[Depends(RateLimiter("public_standard"))])
@@ -47,7 +48,7 @@ async def get_satellite(
     if data is None:
         raise HTTPException(status_code=404, detail="Satellite not found")
 
-    meta = await build_meta(f"/satellites/{norad_id}", db, ["space-track", "celestrak"])
+    meta = await build_meta(f"/satellites/{norad_id}", db, _ORBITAL_SOURCES)
     return APIResponse(data=data, meta=meta)
 
 
@@ -87,7 +88,7 @@ async def get_satellites(
     )
     request.state.cache_state = cache_state
 
-    meta = await build_meta("/satellites", db, ["space-track", "celestrak"])
+    meta = await build_meta("/satellites", db, _ORBITAL_SOURCES)
     return APIResponse(data=data, meta=meta)
 
 
@@ -115,7 +116,7 @@ async def get_satellite_cospar(
         "orbit_class": s.orbit_class,
         "status": s.status,
     }
-    meta = await build_meta(f"/satellites/by-cospar/{cospar_id}", db, ["space-track", "celestrak"])
+    meta = await build_meta(f"/satellites/by-cospar/{cospar_id}", db, _ORBITAL_SOURCES)
     return APIResponse(data=data, meta=meta)
 
 

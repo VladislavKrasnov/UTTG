@@ -8,12 +8,13 @@ from api.models import APIResponse
 from api.schemas import SolarWindResponse, SpaceWeatherIndexResponse
 from api.utils import build_meta
 from core.cache_layer import cached
-from core.capabilities import unavailable_endpoint
+from core.capabilities import tag_sources, unavailable_endpoint
 from core.rate_limit import RateLimiter
 from storage.database import AsyncSessionLocal, get_db
 from storage.models import SolarWind, SpaceWeatherIndex
 
 router = APIRouter(tags=["Space Weather"])
+_WEATHER_SOURCES = tag_sources("Space Weather")
 
 
 @router.get("/space-weather/overview", dependencies=[Depends(RateLimiter("public_light"))])
@@ -54,7 +55,7 @@ async def get_sw_overview(request: Request, db: AsyncSession = Depends(get_db)) 
     request.state.cache_state = cache_state
     return APIResponse(
         data=data,
-        meta=await build_meta("/space-weather/overview", db, ["noaa-swpc"]),
+        meta=await build_meta("/space-weather/overview", db, _WEATHER_SOURCES),
     )
 
 
@@ -74,7 +75,7 @@ async def get_sw_indices(
         for i in indices
     ]
     return APIResponse(
-        data=data, meta=await build_meta("/space-weather/geomagnetic-indices", db, ["noaa-swpc"])
+        data=data, meta=await build_meta("/space-weather/geomagnetic-indices", db, _WEATHER_SOURCES)
     )
 
 
@@ -96,41 +97,45 @@ async def get_sw_wind(
         for w in winds
     ]
     return APIResponse(
-        data=data, meta=await build_meta("/space-weather/solar-wind", db, ["noaa-swpc"])
+        data=data, meta=await build_meta("/space-weather/solar-wind", db, _WEATHER_SOURCES)
     )
 
 
 @router.get("/space-weather/solar-flares", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_flares(db: AsyncSession = Depends(get_db)) -> Any:
     return APIResponse(
-        data=[], meta=await build_meta("/space-weather/solar-flares", db, ["noaa-swpc"])
+        data=[], meta=await build_meta("/space-weather/solar-flares", db, _WEATHER_SOURCES)
     )
 
 
 @router.get("/space-weather/cmes", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_cmes(db: AsyncSession = Depends(get_db)) -> Any:
-    return APIResponse(data=[], meta=await build_meta("/space-weather/cmes", db, ["noaa-swpc"]))
+    return APIResponse(data=[], meta=await build_meta("/space-weather/cmes", db, _WEATHER_SOURCES))
 
 
 @router.get("/space-weather/solar-particle-events", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_spe(db: AsyncSession = Depends(get_db)) -> Any:
     return APIResponse(
-        data=[], meta=await build_meta("/space-weather/solar-particle-events", db, ["noaa-swpc"])
+        data=[], meta=await build_meta("/space-weather/solar-particle-events", db, _WEATHER_SOURCES)
     )
 
 
 @router.get("/space-weather/radiation-storms", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_storms(db: AsyncSession = Depends(get_db)) -> Any:
     return APIResponse(
-        data=[], meta=await build_meta("/space-weather/radiation-storms", db, ["noaa-swpc"])
+        data=[], meta=await build_meta("/space-weather/radiation-storms", db, _WEATHER_SOURCES)
     )
 
 
 @router.get("/space-weather/alerts", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_alerts(db: AsyncSession = Depends(get_db)) -> Any:
-    return APIResponse(data=[], meta=await build_meta("/space-weather/alerts", db, ["noaa-swpc"]))
+    return APIResponse(
+        data=[], meta=await build_meta("/space-weather/alerts", db, _WEATHER_SOURCES)
+    )
 
 
 @router.get("/space-weather/events", dependencies=[Depends(unavailable_endpoint)])
 async def get_sw_events(db: AsyncSession = Depends(get_db)) -> Any:
-    return APIResponse(data=[], meta=await build_meta("/space-weather/events", db, ["noaa-swpc"]))
+    return APIResponse(
+        data=[], meta=await build_meta("/space-weather/events", db, _WEATHER_SOURCES)
+    )

@@ -7,21 +7,20 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sgp4.api import Satrec
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.models import APIResponse
-from api.schemas import OrbitalElementResponse, PositionResponse
+from api.schemas import OrbitalElementResponse, PositionResponse, TwoLineElementResponse
 from api.utils import build_meta
 from core.cache_layer import cached
-from core.capabilities import unavailable_endpoint
+from core.capabilities import tag_sources, unavailable_endpoint
 from core.rate_limit import RateLimiter
 from storage.database import AsyncSessionLocal, get_db
-from storage.models import OrbitalElement
+from storage.models import OrbitalElement, Satellite
 
 router = APIRouter(tags=["Orbital"])
-
-_SOURCES = ["space-track", "celestrak"]
+_ORBITAL_SOURCES = tag_sources("Orbital")
 
 
 def _julian_date(dt: datetime) -> tuple[float, float]:
@@ -123,7 +122,7 @@ async def get_orbital_latest(
         raise HTTPException(status_code=404, detail="Orbital elements not found")
 
     data = OrbitalElementResponse(**{**payload, "epoch": datetime.fromisoformat(payload["epoch"])})
-    meta = await build_meta(f"/satellites/{norad_id}/orbital-elements/latest", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/orbital-elements/latest", db, _ORBITAL_SOURCES)
     meta.freshness.state = freshness_state
     meta.freshness.age_seconds = age_s
     return APIResponse(data=data, meta=meta)
@@ -161,7 +160,7 @@ async def get_orbital_elements(
         )
         for el in elements
     ]
-    meta = await build_meta(f"/satellites/{norad_id}/orbital-elements", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/orbital-elements", db, _ORBITAL_SOURCES)
     return APIResponse(data=data, meta=meta)
 
 
@@ -200,7 +199,7 @@ async def get_position(
         raise HTTPException(status_code=500, detail=f"SGP4 propagation error code {e}")
 
     lat, lon, alt = _teme_to_geodetic(r, instant)
-    meta = await build_meta(f"/satellites/{norad_id}/position", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/position", db, _ORBITAL_SOURCES)
     return APIResponse(
         data=PositionResponse(
             norad_id=norad_id, timestamp=instant, latitude=lat, longitude=lon, altitude=alt
@@ -235,7 +234,7 @@ async def get_ground_track(
     start = datetime.now(UTC).replace(second=0, microsecond=0)
     track = await asyncio.to_thread(_propagate_track, el.tle_line1, el.tle_line2, start, minutes)
 
-    meta = await build_meta(f"/satellites/{norad_id}/ground-track", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/ground-track", db, _ORBITAL_SOURCES)
     return APIResponse(data=track, meta=meta)
 
 
@@ -259,7 +258,7 @@ async def get_passes(
     if not el or not el.tle_line1 or not el.tle_line2:
         raise HTTPException(status_code=404, detail="TLE not available for pass prediction")
 
-    meta = await build_meta(f"/satellites/{norad_id}/passes", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/passes", db, _ORBITAL_SOURCES)
     return APIResponse(
         data={
             "observer": {"lat": lat, "lon": lon, "min_elevation_deg": min_el},
@@ -295,7 +294,7 @@ async def get_orbit_summary(norad_id: int, db: AsyncSession = Depends(get_db)) -
         summary["inclination_deg"] = el.inclination
         summary["epoch"] = el.epoch.isoformat()
 
-    meta = await build_meta(f"/satellites/{norad_id}/orbit-summary", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/orbit-summary", db, _ORBITAL_SOURCES)
     return APIResponse(data=summary, meta=meta)
 
 
@@ -334,17 +333,92 @@ async def get_orbital_changes(
                 }
             )
 
-    meta = await build_meta(f"/satellites/{norad_id}/orbital-changes", db, _SOURCES)
+    meta = await build_meta(f"/satellites/{norad_id}/orbital-changes", db, _ORBITAL_SOURCES)
     return APIResponse(data=changes, meta=meta)
 
 
 @router.get("/orbits/coverage", dependencies=[Depends(RateLimiter("public_standard"))])
 async def get_coverage(db: AsyncSession = Depends(get_db)) -> Any:
-    from sqlalchemy import func
-
-    from storage.models import OrbitalElement
-
     count_row = await db.execute(select(func.count()).select_from(OrbitalElement))
     total = count_row.scalar() or 0
-    meta = await build_meta("/orbits/coverage", db, _SOURCES)
+    meta = await build_meta("/orbits/coverage", db, _ORBITAL_SOURCES)
     return APIResponse(data={"total_orbital_elements": total}, meta=meta)
+
+
+_TLE_SEARCH_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9 \-]{1,31}$"
+_TLE_MAX_AGE = timedelta(days=14)
+_TLE_MAX_IDS = 200
+
+
+def _parse_norad_ids(raw: str | None) -> list[int]:
+    if not raw:
+        return []
+    try:
+        ids = sorted({int(part) for part in raw.split(",") if part.strip()})
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="ids must be comma-separated integers") from exc
+    if len(ids) > _TLE_MAX_IDS or any(not 0 < norad_id < 1_000_000_000 for norad_id in ids):
+        raise HTTPException(
+            status_code=422, detail=f"ids accepts up to {_TLE_MAX_IDS} positive catalog numbers"
+        )
+    return ids
+
+
+@router.get("/orbits/tle", dependencies=[Depends(RateLimiter("public_standard"))])
+async def get_latest_tle_sets(
+    request: Request,
+    ids: str | None = Query(default=None, max_length=2400),
+    search: str | None = Query(default=None, pattern=_TLE_SEARCH_PATTERN),
+    limit: int = Query(500, ge=1, le=2000),
+    db: AsyncSession = Depends(get_db),
+) -> APIResponse[list[TwoLineElementResponse]]:
+    norad_ids = _parse_norad_ids(ids)
+    normalized_search = search.strip().upper() if search else None
+
+    async def load() -> list[dict[str, Any]]:
+        statement = (
+            select(
+                OrbitalElement.norad_id,
+                Satellite.name,
+                OrbitalElement.epoch,
+                OrbitalElement.tle_line1,
+                OrbitalElement.tle_line2,
+            )
+            .join(Satellite, Satellite.norad_id == OrbitalElement.norad_id)
+            .where(
+                OrbitalElement.tle_line1.is_not(None),
+                OrbitalElement.tle_line2.is_not(None),
+                OrbitalElement.epoch > datetime.now(UTC) - _TLE_MAX_AGE,
+            )
+            .distinct(OrbitalElement.norad_id)
+            .order_by(OrbitalElement.norad_id, desc(OrbitalElement.epoch))
+            .limit(limit)
+        )
+        if norad_ids:
+            statement = statement.where(OrbitalElement.norad_id.in_(norad_ids))
+        if normalized_search:
+            statement = statement.where(Satellite.name.startswith(normalized_search))
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(statement)).all()
+        return [
+            {
+                "norad_id": row.norad_id,
+                "name": row.name,
+                "epoch": row.epoch.isoformat(),
+                "tle_line1": row.tle_line1,
+                "tle_line2": row.tle_line2,
+            }
+            for row in rows
+        ]
+
+    cache_key = f"tle:{','.join(map(str, norad_ids))}:{normalized_search or ''}:{limit}"
+    payload, freshness_state, age_seconds = await cached(cache_key, load, ttl=900, stale=7200)
+    if not payload:
+        payload, freshness_state, age_seconds = await load(), "miss", 0
+    request.state.cache_state = freshness_state
+    meta = await build_meta("/orbits/tle", db, _ORBITAL_SOURCES)
+    meta.freshness.state = freshness_state
+    meta.freshness.age_seconds = age_seconds
+    return APIResponse(
+        data=[TwoLineElementResponse.model_validate(item) for item in payload], meta=meta
+    )
