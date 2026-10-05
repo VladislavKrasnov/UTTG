@@ -65,7 +65,7 @@ class WebhookPatch(BaseModel):
         return normalized
 
 
-def _owner_statement(webhook_id: str, client: dict[str, str]) -> Select[tuple[Webhook]]:
+def _owner_statement(webhook_id: str, client: dict[str, str]) -> Select[Webhook]:
     return select(Webhook).where(
         Webhook.id == webhook_id,
         Webhook.owner_ip_fingerprint == client["id"],

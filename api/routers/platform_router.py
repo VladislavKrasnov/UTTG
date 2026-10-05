@@ -66,22 +66,25 @@ async def capabilities(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
 
 @router.get("/providers", dependencies=[Depends(RateLimiter("public_light"))])
 async def providers(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
-    configured = configured_providers()
-    rows = (
-        (await db.execute(select(ProviderHealth).where(ProviderHealth.id.in_(configured))))
+    configured = sorted(configured_providers())
+    rows = {
+        row.id: row
+        for row in (
+            await db.execute(select(ProviderHealth).where(ProviderHealth.id.in_(configured)))
+        )
         .scalars()
         .all()
-    )
+    }
     data = [
         {
-            "id": r.id,
-            "status": r.status,
-            "last_success_at": r.last_success_at,
-            "last_error_at": r.last_error_at,
+            "id": provider_id,
+            "status": rows[provider_id].status if provider_id in rows else "pending",
+            "last_success_at": rows[provider_id].last_success_at if provider_id in rows else None,
+            "last_error_at": rows[provider_id].last_error_at if provider_id in rows else None,
         }
-        for r in rows
+        for provider_id in configured
     ]
-    meta = await build_meta("/providers", db, [r.id for r in rows])
+    meta = await build_meta("/providers", db, configured)
     return APIResponse(data=data, meta=meta).model_dump()
 
 

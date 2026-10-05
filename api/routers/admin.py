@@ -18,11 +18,11 @@ router = APIRouter(tags=["Admin"])
 _SOURCES = [
     "space-track",
     "celestrak",
+    "jpl-ssd",
     "nasa-neows",
     "noaa-swpc",
     "the-space-devs",
-    "jpl-horizons",
-    "esa",
+    "rocketlaunch-live",
 ]
 
 
