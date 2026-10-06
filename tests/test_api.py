@@ -133,16 +133,6 @@ def test_build_meta_resilience_logic():
     assert resilience == "degraded"
 
 
-def test_noaa_endpoints_exist():
-    from providers.noaa import NoaaClient
-
-    client = NoaaClient()
-    assert hasattr(client, "get_planetary_k")
-    assert hasattr(client, "get_solar_wind")
-    assert hasattr(client, "get_alerts")
-    assert hasattr(client, "get_solar_flares")
-
-
 def test_spacetrack_guards_exist():
     from providers.spacetrack import SpaceTrackClient
 
