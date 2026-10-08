@@ -1,142 +1,175 @@
+x-app-environment: &app_environment
+  UTTG_ENVIRONMENT: production
+  UTTG_DATABASE_URL: ${UTTG_DATABASE_URL:?Set UTTG_DATABASE_URL}
+  UTTG_VALKEY_URL: valkey://valkey:6379/0
+  UTTG_NATS_URL: nats://nats:4222
+  UTTG_IP_FINGERPRINT_SECRET: ${UTTG_IP_FINGERPRINT_SECRET:?Set UTTG_IP_FINGERPRINT_SECRET}
+  UTTG_WEBHOOK_ENCRYPTION_KEY: ${UTTG_WEBHOOK_ENCRYPTION_KEY:?Set UTTG_WEBHOOK_ENCRYPTION_KEY}
+  UTTG_TRUSTED_PROXIES: 10.0.0.0/8
+  UTTG_CORS_ORIGINS: https://uttg.oxis.cc,https://demo.uttg.oxis.cc,https://hub.uttg.oxis.cc,https://presentation.uttg.oxis.cc
+  UTTG_DATABASE_POOL_SIZE: "4"
+  UTTG_DATABASE_MAX_OVERFLOW: "2"
+  UTTG_DATABASE_POOL_TIMEOUT_SECONDS: "2"
+  UTTG_DATABASE_STATEMENT_TIMEOUT_MS: "5000"
+  UTTG_HTTP_PROXY: ${UTTG_HTTP_PROXY:-}
+  UTTG_NASA_API_KEY: ${UTTG_NASA_API_KEY:-}
+  UTTG_SPACE_TRACK_IDENTITY: ${UTTG_SPACE_TRACK_IDENTITY:-}
+  UTTG_SPACE_TRACK_PASSWORD: ${UTTG_SPACE_TRACK_PASSWORD:-}
+  UTTG_THE_SPACE_DEVS_API_KEY: ${UTTG_THE_SPACE_DEVS_API_KEY:-}
+  UTTG_ENABLE_CELESTRAK: ${UTTG_ENABLE_CELESTRAK:-true}
+  UTTG_ENABLE_NOAA_SWPC: ${UTTG_ENABLE_NOAA_SWPC:-true}
+  UTTG_ENABLE_JPL: ${UTTG_ENABLE_JPL:-true}
+  UTTG_ENABLE_ESA: "false"
+  UTTG_ENABLE_SPACE_DEVS_PUBLIC_API: ${UTTG_ENABLE_SPACE_DEVS_PUBLIC_API:-false}
+  UTTG_ENABLE_ROCKETLAUNCH_LIVE: ${UTTG_ENABLE_ROCKETLAUNCH_LIVE:-true}
+  UTTG_WEBHOOK_DELIVERY_CONCURRENCY: "8"
+  UTTG_ANALYTICS_QUEUE_SIZE: "5000"
+
+x-app-service: &app_service
+  image: ${UTTG_IMAGE:?Set UTTG_IMAGE to the locally built release image}
+  environment: *app_environment
+  networks: [internal, egress]
+  read_only: true
+  tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+
+x-stateful-deploy: &stateful_deploy
+  replicas: 1
+  update_config: { order: stop-first, failure_action: rollback }
+  restart_policy: { condition: any, delay: 5s }
+
 services:
   api:
-    image: ${UTTG_IMAGE:?Set UTTG_IMAGE to the locally built release image}
-    environment: &app_environment
-      UTTG_ENVIRONMENT: production
-      UTTG_DATABASE_URL: ${UTTG_DATABASE_URL:?Set UTTG_DATABASE_URL}
-      UTTG_VALKEY_URL: valkey://valkey:6379/0
-      UTTG_NATS_URL: nats://nats:4222
-      UTTG_IP_FINGERPRINT_SECRET: ${UTTG_IP_FINGERPRINT_SECRET:?Set UTTG_IP_FINGERPRINT_SECRET}
-      UTTG_WEBHOOK_ENCRYPTION_KEY: ${UTTG_WEBHOOK_ENCRYPTION_KEY:?Set UTTG_WEBHOOK_ENCRYPTION_KEY}
-      UTTG_TRUSTED_PROXIES: 10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
-      UTTG_CORS_ORIGINS: https://uttg.oxis.cc
-      UTTG_DATABASE_POOL_SIZE: "4"
-      UTTG_DATABASE_MAX_OVERFLOW: "2"
-      UTTG_DATABASE_POOL_TIMEOUT_SECONDS: "2"
-      UTTG_DATABASE_STATEMENT_TIMEOUT_MS: "3000"
-      UTTG_API_WORKERS: "1"
-      UTTG_NASA_API_KEY: ${UTTG_NASA_API_KEY:-}
-      UTTG_SPACE_TRACK_IDENTITY: ${UTTG_SPACE_TRACK_IDENTITY:-}
-      UTTG_SPACE_TRACK_PASSWORD: ${UTTG_SPACE_TRACK_PASSWORD:-}
-      UTTG_THE_SPACE_DEVS_API_KEY: ${UTTG_THE_SPACE_DEVS_API_KEY:-}
-      UTTG_ENABLE_CELESTRAK: ${UTTG_ENABLE_CELESTRAK:-true}
-      UTTG_ENABLE_NOAA_SWPC: ${UTTG_ENABLE_NOAA_SWPC:-true}
-      UTTG_ENABLE_JPL: ${UTTG_ENABLE_JPL:-true}
-      UTTG_ENABLE_ESA: ${UTTG_ENABLE_ESA:-false}
-      UTTG_ENABLE_SPACE_DEVS_PUBLIC_API: ${UTTG_ENABLE_SPACE_DEVS_PUBLIC_API:-true}
-      UTTG_WEBHOOK_DELIVERY_CONCURRENCY: "8"
-      UTTG_ANALYTICS_QUEUE_SIZE: "5000"
-    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--proxy-headers", "--forwarded-allow-ips", "*"]
-    networks: [internal, edge]
-    read_only: true
-    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
+    <<: *app_service
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--loop", "uvloop", "--timeout-graceful-shutdown", "20"]
+    stop_grace_period: 25s
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     deploy:
       replicas: 2
       update_config:
         parallelism: 1
-        delay: 5s
+        delay: 10s
         order: start-first
         failure_action: rollback
         monitor: 30s
       rollback_config:
         parallelism: 1
         order: start-first
-      restart_policy:
-        condition: on-failure
+      restart_policy: { condition: any, delay: 3s }
       resources:
-        limits:
-          memory: 220M
-        reservations:
-          memory: 96M
-      labels:
-        - traefik.enable=true
-        - traefik.http.routers.uttg.rule=Host(`uttg.oxis.cc`) && !Path(`/metrics`) && !PathPrefix(`/v1/admin`)
-        - traefik.http.routers.uttg.entrypoints=websecure
-        - traefik.http.routers.uttg.tls.certresolver=letsencrypt
-        - traefik.http.services.uttg.loadbalancer.server.port=8000
-        - traefik.http.services.uttg.loadbalancer.healthcheck.path=/v1/ready
-        - traefik.http.services.uttg.loadbalancer.healthcheck.interval=5s
+        limits: { memory: 240M }
+        reservations: { memory: 96M }
 
   worker:
-    image: ${UTTG_IMAGE:?Set UTTG_IMAGE}
-    environment: *app_environment
+    <<: *app_service
     command: ["python", "-m", "ingestion.worker"]
-    networks: [internal, edge]
-    read_only: true
-    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
     deploy:
-      replicas: 1
-      update_config: { order: stop-first }
-      restart_policy: { condition: on-failure }
+      <<: *stateful_deploy
       resources: { limits: { memory: 160M } }
 
   scheduler:
-    image: ${UTTG_IMAGE:?Set UTTG_IMAGE}
-    environment: *app_environment
+    <<: *app_service
     command: ["python", "-m", "ingestion.scheduler"]
-    networks: [internal, edge]
-    read_only: true
-    tmpfs: ["/tmp:size=32m,noexec,nosuid"]
     deploy:
-      replicas: 1
-      update_config: { order: stop-first }
-      restart_policy: { condition: on-failure }
-      resources: { limits: { memory: 160M } }
+      <<: *stateful_deploy
+      resources: { limits: { memory: 320M } }
 
   db:
     image: timescale/timescaledb:2.17.2-pg17
+    command:
+      - postgres
+      - -c
+      - shared_buffers=96MB
+      - -c
+      - effective_cache_size=256MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=48MB
+      - -c
+      - max_connections=60
+      - -c
+      - max_worker_processes=8
+      - -c
+      - timescaledb.max_background_workers=4
+      - -c
+      - timescaledb.telemetry_level=off
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_timeout=15min
     environment:
       POSTGRES_USER: uttg
       POSTGRES_PASSWORD: ${UTTG_POSTGRES_PASSWORD:?Set UTTG_POSTGRES_PASSWORD}
       POSTGRES_DB: uttg
     volumes: [postgres_data:/var/lib/postgresql/data]
     networks: [internal]
+    shm_size: 128m
+    stop_grace_period: 60s
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uttg -d uttg"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     deploy:
-      replicas: 1
-      restart_policy: { condition: any }
-      resources: { limits: { memory: 360M } }
+      <<: *stateful_deploy
+      resources: { limits: { memory: 420M } }
 
   valkey:
     image: valkey/valkey:8.0.0
     command: ["valkey-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-lfu"]
     volumes: [valkey_data:/data]
     networks: [internal]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     deploy:
-      replicas: 1
-      restart_policy: { condition: any }
+      <<: *stateful_deploy
       resources: { limits: { memory: 160M } }
 
   nats:
     image: nats:2.10.22-alpine
-    command: ["-js", "-sd", "/data"]
+    command: ["-js", "-sd", "/data", "-m", "8222"]
     volumes: [nats_data:/data]
     networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz | grep -q ok"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     deploy:
-      replicas: 1
-      restart_policy: { condition: any }
+      <<: *stateful_deploy
       resources: { limits: { memory: 96M } }
 
   caddy:
     image: caddy:2.8.4-alpine
-    environment:
-      ACME_AGREE: "true"
-      UTTG_ACME_EMAIL: ${UTTG_ACME_EMAIL:?Set UTTG_ACME_EMAIL}
-    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
     ports:
-      - "80:80"
-      - "443:443"
+      - { target: 80, published: 80, protocol: tcp, mode: host }
+      - { target: 443, published: 443, protocol: tcp, mode: host }
+      - { target: 443, published: 443, protocol: udp, mode: host }
     volumes:
       - caddy_data:/data
       - caddy_config:/config
+      - /opt/uttg-sites:/srv:ro
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile
-    networks: [edge, internal]
+    networks: [internal, egress]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     deploy:
-      replicas: 1
+      <<: *stateful_deploy
       placement:
         constraints: [node.role == manager]
-      restart_policy: { condition: any }
       resources: { limits: { memory: 128M } }
 
 networks:
@@ -144,7 +177,7 @@ networks:
     driver: overlay
     internal: true
     attachable: true
-  edge:
+  egress:
     driver: overlay
     attachable: true
 
@@ -157,4 +190,5 @@ volumes:
 
 configs:
   caddyfile:
+    name: uttg-caddyfile-${UTTG_CADDYFILE_DIGEST:?Set UTTG_CADDYFILE_DIGEST}
     file: ./Caddyfile
