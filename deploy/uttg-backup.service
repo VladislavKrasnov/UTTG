@@ -1,0 +1,10 @@
+[Unit]
+Description=UTTG PostgreSQL backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/uttg/deploy/backup.sh
+Nice=10
+IOSchedulingClass=idle
