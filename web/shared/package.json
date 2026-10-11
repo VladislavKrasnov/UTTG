@@ -1,0 +1,13 @@
+{
+  "name": "@uttg/shared",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./api": "./src/api.js",
+    "./format": "./src/format.js",
+    "./tokens.css": "./src/tokens.css",
+    "./qr/*": "./qr/*",
+    "./fonts/*": "./fonts/*",
+    "./measurements": "./src/measurements.js"
+  }
+}
