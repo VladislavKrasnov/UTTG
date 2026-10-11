@@ -1,0 +1,10 @@
+{
+  "name": "ЕШКТ — демонстрация",
+  "short_name": "ЕШКТ",
+  "start_url": "/",
+  "display": "fullscreen",
+  "orientation": "landscape",
+  "background_color": "#04060a",
+  "theme_color": "#04060a",
+  "icons": [{ "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml" }]
+}
