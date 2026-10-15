@@ -1,0 +1,576 @@
+:root {
+  --card: var(--gray);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.app {
+  height: 100dvh;
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.viewport {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.stage {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.slide {
+  position: absolute;
+  inset: 0;
+  animation: enter 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+.slide-header {
+  position: absolute;
+  top: 40px;
+  left: 80px;
+  right: 80px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.slide-brand {
+  font-size: 24px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.slide-number {
+  font-size: 20px;
+  color: var(--text-dim);
+}
+
+.progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 6px;
+  width: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  transition: transform 0.4s ease;
+}
+
+.layout {
+  position: absolute;
+  inset: 120px 80px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.title {
+  font-size: 64px;
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+}
+
+.grid {
+  flex: 1;
+  display: grid;
+  gap: 24px;
+  min-height: 0;
+}
+
+.g-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.g-4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+
+.r-1 {
+  grid-template-rows: 1fr;
+}
+
+.r-2 {
+  grid-template-rows: repeat(2, 1fr);
+}
+
+.c-1 {
+  grid-column: span 1;
+}
+
+.c-2 {
+  grid-column: span 2;
+}
+
+.c-3 {
+  grid-column: span 3;
+}
+
+.c-4 {
+  grid-column: span 4;
+}
+
+.card.r-2 {
+  grid-row: span 2;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  padding: 36px;
+  background: var(--card);
+  min-height: 0;
+}
+
+.card h3 {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-bottom: 12px;
+}
+
+.card p {
+  margin-top: auto;
+  font-size: 26px;
+  font-weight: 300;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.card.accent {
+  background: var(--accent);
+  color: #fff;
+}
+
+.card.accent p {
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.card.danger .big {
+  color: var(--accent);
+}
+
+.big {
+  font-size: 76px;
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  margin-bottom: 18px;
+  color: var(--accent);
+}
+
+.card.accent .big {
+  color: #fff;
+}
+
+.hero .hero-mark,
+.split-v .hero-mark {
+  font-size: 120px;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+  line-height: 1;
+}
+
+.hero p {
+  max-width: 1100px;
+  font-size: 32px;
+}
+
+.split {
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.split > div {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.qr {
+  width: 200px;
+  height: 200px;
+  flex: none;
+  background: #fff;
+}
+
+.qr.large {
+  width: 300px;
+  height: 300px;
+}
+
+.qr-card {
+  align-items: flex-start;
+}
+
+.qr-card .qr {
+  margin-bottom: auto;
+}
+
+.flow {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 24px;
+}
+
+.flow-step {
+  position: relative;
+  padding: 40px 24px;
+  background: var(--card);
+  font-size: 28px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.flow-step:not(:last-child)::after {
+  content: "→";
+  position: absolute;
+  right: -22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 28px;
+  color: var(--accent);
+  z-index: 1;
+}
+
+.flow-step.accent {
+  background: var(--accent);
+  color: #fff;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 26px;
+}
+
+.data-table th {
+  text-align: left;
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 0 24px 18px 0;
+  border-bottom: 3px solid var(--text);
+}
+
+.data-table td {
+  padding: 22px 24px 22px 0;
+  border-bottom: 1px solid var(--line);
+  line-height: 1.3;
+  vertical-align: top;
+}
+
+.data-table td:first-child {
+  font-weight: 600;
+  width: 30%;
+}
+
+.data-table td:last-child {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+
+.telemetry {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 28px;
+}
+
+.telemetry-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 26px;
+  color: var(--text-dim);
+}
+
+.dot {
+  width: 14px;
+  height: 14px;
+  background: var(--accent);
+}
+
+.dot.ok {
+  background: var(--text);
+}
+
+.telemetry-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.telemetry-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 28px;
+  background: var(--bg);
+}
+
+.telemetry-label {
+  font-size: 22px;
+  color: var(--text-dim);
+}
+
+.telemetry-value {
+  font-size: 64px;
+  font-weight: 600;
+  color: var(--accent);
+  line-height: 1.05;
+}
+
+.telemetry-value.small {
+  font-size: 34px;
+  color: var(--text);
+}
+
+.telemetry-note {
+  margin-top: auto;
+  font-size: 20px;
+  font-weight: 300;
+  color: var(--text-dim);
+}
+
+.nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 56px;
+  height: 96px;
+  border: 0;
+  background: var(--gray);
+  color: var(--text);
+  font-size: 48px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.viewport:hover .nav {
+  opacity: 1;
+}
+
+.nav:disabled {
+  visibility: hidden;
+}
+
+.nav.prev {
+  left: 0;
+}
+
+.nav.next {
+  right: 0;
+}
+
+html:has(.reader),
+html:has(.reader) body,
+html:has(.reader) #root {
+  height: auto;
+  overflow: visible;
+}
+
+.reader {
+  display: grid;
+  gap: 16px;
+  padding: 16px 16px 48px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.reader .slide {
+  position: relative;
+  inset: auto;
+  padding: 20px 0 32px;
+  border-bottom: 2px solid var(--text);
+  animation: none;
+}
+
+.reader .slide:last-child {
+  border-bottom: 0;
+}
+
+.reader .slide-header {
+  position: static;
+  margin-bottom: 16px;
+}
+
+.reader .slide-brand,
+.reader .slide-number {
+  font-size: 15px;
+}
+
+.reader .layout {
+  position: static;
+  gap: 16px;
+}
+
+.reader .title {
+  font-size: clamp(28px, 7vw, 44px);
+}
+
+.reader .grid {
+  grid-template-columns: 1fr;
+  grid-template-rows: none;
+  gap: 12px;
+}
+
+.reader .card {
+  grid-column: auto;
+  grid-row: auto;
+  padding: 20px;
+  min-height: 0;
+}
+
+.reader .card.r-2 {
+  grid-row: auto;
+}
+
+.reader .card h3 {
+  font-size: 20px;
+  margin-bottom: 8px;
+}
+
+.reader .card p {
+  margin-top: 8px;
+  font-size: 16px;
+}
+
+.reader .big {
+  font-size: clamp(36px, 10vw, 52px);
+  margin-bottom: 10px;
+}
+
+.reader .hero .hero-mark,
+.reader .split-v .hero-mark {
+  font-size: clamp(44px, 13vw, 72px);
+}
+
+.reader .hero p {
+  font-size: 18px;
+}
+
+.reader .split {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.reader .qr,
+.reader .qr.large {
+  width: 160px;
+  height: 160px;
+}
+
+.reader .flow {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.reader .flow-step {
+  padding: 16px;
+  font-size: 18px;
+  text-align: left;
+}
+
+.reader .flow-step:not(:last-child)::after {
+  content: "↓";
+  right: 16px;
+  font-size: 18px;
+}
+
+.reader .data-table,
+.reader .data-table tbody,
+.reader .data-table tr,
+.reader .data-table td {
+  display: block;
+  width: auto;
+}
+
+.reader .data-table thead {
+  display: none;
+}
+
+.reader .data-table tr {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.reader .data-table td {
+  padding: 2px 0;
+  border: 0;
+  font-size: 16px;
+}
+
+.reader .data-table td:first-child {
+  width: auto;
+  font-size: 18px;
+}
+
+.reader .telemetry-grid {
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.reader .telemetry-grid > div {
+  padding: 16px;
+}
+
+.reader .telemetry-head {
+  font-size: 16px;
+}
+
+.reader .telemetry-label {
+  font-size: 15px;
+}
+
+.reader .telemetry-value {
+  font-size: 36px;
+}
+
+.reader .telemetry-value.small {
+  font-size: 20px;
+}
+
+.reader .telemetry-note {
+  font-size: 14px;
+}
+
+@media (min-width: 640px) {
+  .reader .grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .reader .card.c-2,
+  .reader .card.c-3,
+  .reader .card.c-4 {
+    grid-column: 1 / -1;
+  }
+
+  .reader .telemetry-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
