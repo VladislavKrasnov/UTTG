@@ -23,11 +23,32 @@ The API never calls a provider while serving a client request. The scheduler per
 - provider adapters cap response size, connection count, and concurrency;
 - webhook consumers acknowledge only after a terminal success or durable dead-letter action.
 
+## Ingestion scheduling
+
+Each job takes a 15-minute lease in Valkey while it runs and extends it to the full interval only after success, so a crashed process retries within minutes instead of hours. Failures back off exponentially from 60 s up to the job interval with ±20% jitter. Health writes are best effort and never stop a job loop; jobs run in an `asyncio.TaskGroup`, so a fatal error terminates the process and the orchestrator restarts it. Provider transports open a 10-minute circuit after five failures in five minutes, including 403 and 429 replies.
+
+| Job | Interval |
+|---|---|
+| NOAA SWPC | 5 min |
+| Launches | 30 min |
+| CelesTrak | 2 h |
+| JPL close approaches | 6 h |
+| Space-Track SATCAT | 24 h |
+
 ## Deployment
 
-Compose runs migration, API, scheduler, worker, TimescaleDB, Valkey, NATS, and Traefik services. Application containers run as UID 10001 with a read-only root filesystem and `no-new-privileges`. Data services are not published to the host. Prometheus and Grafana are optional and bind only to localhost.
+Local development uses Compose (`compose.yml`). Production runs the single-node Swarm stack in `deploy/stack.yml`: two API replicas with start-first rolling updates and automatic rollback, Caddy with automatic TLS, host-mode ports so client addresses reach the rate limiter, and memory limits sized for 1 vCPU / 2 GB. Caddy discovers API tasks through `tasks.api`, health-checks them and retries a request for up to 15 s during a rollout.
 
-For multiple hosts, move PostgreSQL, Valkey, and NATS to replicated managed or independently operated clusters, use a real secret manager, add TLS and authentication between services, and replace the Docker socket mount with a restricted proxy or a non-Docker service-discovery mechanism. Test backup restoration, graceful shutdown, dependency loss, and rolling migration behavior before accepting production traffic.
+`deploy/release.sh` runs from a workstation: it builds the web apps in `web/`, syncs code and static sites over SSH and calls `deploy/deploy.sh` on the server, which builds the image, applies migrations and rolls the stack. Secrets live only in `deploy/.env` on the server. `deploy/uttg-backup.timer` writes a verified daily `pg_dump`; TimescaleDB retention keeps orbital elements 45 days, space weather 120 days and endpoint metrics 30 days.
+
+Static sites served by Caddy share the API origin under `/v1`, so they need no CORS and run under a strict Content-Security-Policy:
+
+| Host | Content |
+|---|---|
+| `uttg.oxis.cc` | REST API and `/docs` |
+| `demo.uttg.oxis.cc` | live kiosk (`web/demo`) |
+| `presentation.uttg.oxis.cc` | slides with presenter mode (`web/presentation`) |
+| `hub.uttg.oxis.cc` | index and research paper (`web/hub`) |
 
 ## Schema changes
 

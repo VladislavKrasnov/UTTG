@@ -39,6 +39,22 @@ For production set `UTTG_ENVIRONMENT=production`, use independent random secrets
 - [Performance and capacity](PERFORMANCE.md)
 - [Third-party data notices](THIRD_PARTY_DATA_NOTICES.md)
 
+## Web apps
+
+`web/` is an npm workspace with the kiosk demo, the presentation and the hub. They call the API under the same origin.
+
+```bash
+npm ci --prefix web
+npm run dev:demo --prefix web     # proxies /v1 to https://uttg.oxis.cc
+npm run build --prefix web
+```
+
+## Release
+
+```bash
+UTTG_DEPLOY_HOST=ubuntu@<server> ./deploy/release.sh
+```
+
 ## Verification
 
 ```bash
