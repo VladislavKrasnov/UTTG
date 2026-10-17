@@ -63,7 +63,6 @@ jobs:
         UTTG_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/uttg
         UTTG_VALKEY_URL: valkey://localhost:6379/0
         UTTG_NATS_URL: nats://localhost:4222
-        UTTG_API_KEY_SECRET: test-api-key-secret-at-least-32-characters
         UTTG_IP_FINGERPRINT_SECRET: test-ip-secret-at-least-32-characters
       run: alembic upgrade head
     - name: Test with pytest
@@ -71,6 +70,21 @@ jobs:
         UTTG_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/uttg
         UTTG_VALKEY_URL: valkey://localhost:6379/0
         UTTG_NATS_URL: nats://localhost:4222
-        UTTG_API_KEY_SECRET: test-api-key-secret-at-least-32-characters
         UTTG_IP_FINGERPRINT_SECRET: test-ip-secret-at-least-32-characters
       run: pytest
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "24"
+        cache: npm
+        cache-dependency-path: web/package-lock.json
+    - name: Install web dependencies
+      run: npm ci --prefix web
+    - name: Lint web apps
+      run: npm run lint --prefix web
+    - name: Build web apps
+      run: npm run build --prefix web
